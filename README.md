@@ -32,3 +32,9 @@ Version: `4.4-simple-login-local-fallback`
 
 ## v4.4 note
 Login now opens without a password even when Google Apps Script is not connected. Until the Apps Script /exec URL is deployed and reachable, data is stored only on the current device and will not be shared between mobile and desktop.
+
+
+## v4.6 changes
+- Added search box in Log Entry / Payment to search by vehicle number or distributor name.
+- Added Statement search box to filter by vehicle number or distributor name.
+- Clear button now clears statement dates, distributor filter and search text.

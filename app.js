@@ -1,7 +1,7 @@
 const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec";
-const APP_VERSION = "4.5-simple-direct-login";
+const APP_VERSION = "4.6-search-vehicle-distributor";
 const FORCE_BACKEND_MODE = false;
-// v4.5: simple username-only login. No password is required.
+// v4.6: simple username-only login with vehicle/distributor search in entry and statement.
 // Login never depends on Google Apps Script. Google Sheet sync is optional and runs after the app opens.
 // For mobile/desktop shared data, deploy Code.gs and keep the /exec URL above updated.
 let CLOUD_API_URL = DEFAULT_CLOUD_API_URL;
@@ -747,19 +747,92 @@ function getLedger() {
   return ledger;
 }
 
+function vehicleSearchText(vehicleNo) {
+  const item = vehicles[vehicleNo] || {};
+  return `${vehicleNo} ${item.distributorName || ""} ${item.distributorPhone || ""}`.toLowerCase();
+}
+
+function vehicleOptionText(vehicleNo) {
+  const item = vehicles[vehicleNo] || {};
+  return `${vehicleNo} [${item.distributorName || "N/A"}] (${formatINR(item.rate)}/jar)`;
+}
+
+function renderTxVehicleOptions() {
+  const select = $("txVehicle");
+  if (!select) return;
+
+  const oldValue = select.value;
+  const keyword = ($("txVehicleSearch")?.value || "").toLowerCase().trim();
+  const keys = Object.keys(vehicles)
+    .filter(v => !keyword || vehicleSearchText(v).includes(keyword))
+    .sort();
+
+  const placeholder = keyword
+    ? `-- ${keys.length} matching vehicle(s) --`
+    : "-- Choose Registered Vehicle --";
+  select.innerHTML = `<option value="" disabled selected>${placeholder}</option>`;
+
+  keys.forEach(v => {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = vehicleOptionText(v);
+    select.appendChild(opt);
+  });
+
+  if (oldValue && keys.includes(oldValue)) {
+    select.value = oldValue;
+  } else if (keyword) {
+    const exact = keys.find(v => v.toLowerCase() === keyword || (vehicles[v]?.distributorName || "").toLowerCase() === keyword);
+    if (exact) select.value = exact;
+    else if (keys.length === 1) select.value = keys[0];
+  }
+}
+
+function refreshTxVehicleSearchList() {
+  const list = $("txVehicleSearchList");
+  if (!list) return;
+  list.innerHTML = "";
+  Object.keys(vehicles).sort().forEach(v => {
+    const item = vehicles[v] || {};
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.label = `${item.distributorName || "N/A"} • ${formatINR(item.rate)}/jar`;
+    list.appendChild(opt);
+  });
+}
+
+function onTxVehicleSearchInput() {
+  const input = $("txVehicleSearch");
+  const value = (input?.value || "").trim().toUpperCase();
+  const select = $("txVehicle");
+
+  renderTxVehicleOptions();
+
+  if (value && vehicles[value] && select) {
+    select.value = value;
+  }
+}
+
+function onTxVehicleSelectChange() {
+  const select = $("txVehicle");
+  const input = $("txVehicleSearch");
+  if (!select || !input || !select.value) return;
+  input.value = select.value;
+}
+
+function clearTxVehicleSearch() {
+  if ($("txVehicleSearch")) $("txVehicleSearch").value = "";
+  renderTxVehicleOptions();
+}
+
 function renderDropdowns() {
   const txVehicleOld = $("txVehicle")?.value;
   const reportOld = $("reportFilterDistributor")?.value || "all";
   const statementOld = $("statementDistributor")?.value || "all";
   const distributors = [...new Set(Object.values(vehicles).map(v => v.distributorName).filter(Boolean))].sort();
 
-  $("txVehicle").innerHTML = '<option value="" disabled selected>-- Choose Registered Vehicle --</option>';
-  Object.keys(vehicles).sort().forEach(v => {
-    const opt = document.createElement("option");
-    opt.value = v;
-    opt.textContent = `${v} [${vehicles[v].distributorName || "N/A"}] (${formatINR(vehicles[v].rate)}/jar)`;
-    $("txVehicle").appendChild(opt);
-  });
+  refreshTxVehicleSearchList();
+  renderTxVehicleOptions();
   if (vehicles[txVehicleOld]) $("txVehicle").value = txVehicleOld;
 
   ["reportFilterDistributor", "statementDistributor"].forEach(id => {
@@ -845,6 +918,7 @@ function selectDistributor(dist) {
   if (dist && dist !== "N/A") {
     $("reportFilterDistributor").value = dist;
     $("statementDistributor").value = dist;
+    if ($("statementSearch")) $("statementSearch").value = "";
   }
   onDistributorFilterChange();
   switchTab("statement");
@@ -877,10 +951,13 @@ function getStatementPeriod() {
 function txMatchesStatementFilters(tx) {
   const selected = $("statementDistributor")?.value || $("reportFilterDistributor")?.value || "all";
   const dist = vehicles[tx.vehicle]?.distributorName || "N/A";
+  const vehicleNo = String(tx.vehicle || "");
+  const keyword = ($("statementSearch")?.value || "").toLowerCase().trim();
   const period = getStatementPeriod();
   const timestamp = Number(tx.timestamp || 0);
 
   if (selected !== "all" && dist !== selected) return false;
+  if (keyword && !vehicleNo.toLowerCase().includes(keyword) && !dist.toLowerCase().includes(keyword)) return false;
   if (period.from !== null && timestamp < period.from) return false;
   if (period.to !== null && timestamp > period.to) return false;
 
@@ -898,8 +975,12 @@ function statementPeriodLabel() {
 function clearStatementPeriod() {
   if ($("statementFromDate")) $("statementFromDate").value = "";
   if ($("statementToDate")) $("statementToDate").value = "";
+  if ($("statementSearch")) $("statementSearch").value = "";
+  if ($("statementDistributor")) $("statementDistributor").value = "all";
+  if ($("reportFilterDistributor")) $("reportFilterDistributor").value = "all";
+  calculateReports();
   renderDetailedDistributorReport();
-  showToast("Statement period cleared");
+  showToast("Statement filters cleared");
 }
 
 function getFilteredStatementTransactions() {
@@ -980,6 +1061,8 @@ function inlineEditTx(id) {
   if (!tx) return;
   switchTab("logentry");
   setEntryType(tx.type);
+  if ($("txVehicleSearch")) $("txVehicleSearch").value = tx.vehicle;
+  renderTxVehicleOptions();
   $("txVehicle").value = tx.vehicle;
   const d = new Date(tx.timestamp); const offset = d.getTimezoneOffset() * 60000;
   $("txDateTime").value = new Date(d.getTime() - offset).toISOString().slice(0,16);
@@ -1139,6 +1222,7 @@ function bindForms() {
     const tx = { id: $("txForm").dataset.editId ? Number($("txForm").dataset.editId) : Date.now(), timestamp, datetimeStr: cleanFormatDate(timestamp), vehicle, type:currentEntryType, jars, rateApplied: currentEntryType === "load" ? rate : 0, financialValue: amount, submittedBy: currentUser?.username || "unknown" };
     postToCloud({ action:"addTx", tx });
     $("txForm").reset();
+    clearTxVehicleSearch();
     delete $("txForm").dataset.editId;
     $("txFormTitle").textContent = "📝 New Transaction";
     setEntryType("load");
