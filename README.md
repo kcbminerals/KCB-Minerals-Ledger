@@ -1,40 +1,18 @@
-# KCB Minerals Ledger Pro — Simple Login Build
+KCB Minerals Ledger v4.7 - Mobile Layout Fix
 
-This package is changed to **username-only login**. No password is required.
+Changes:
+- Mobile sidebar changed into bottom navigation.
+- Log Entry, Payment, Statement and Register pages now use one-column mobile layout.
+- Inputs and buttons are larger and easier to tap on phone.
+- Tables scroll horizontally instead of breaking the screen.
+- Statement filters stack properly on mobile.
+- Cache version updated to v4.7.
 
-## Login
+Upload to GitHub:
+1. Replace index.html
+2. Replace style.css
+3. Replace app.js
+4. Commit changes
+5. Open the app on mobile and refresh/clear cache.
 
-- Type `admin` for full access: dashboard, statements, export, edit/delete, user management.
-- Type any other name, for example `driver1`, for entry access: registration and log entry.
-- Mobile and desktop both sync through the same Google Sheet backend.
-
-## Files
-
-- `index.html` — app page for GitHub Pages
-- `app.js` — frontend logic
-- `style.css` — design
-- `Code.gs` — Google Apps Script backend for Google Sheet sync
-- `assets/logo.png` — logo
-
-## Important setup
-
-1. In your existing Google Sheet, open **Extensions → Apps Script**.
-2. Replace the code with `Code.gs` from this package.
-3. In `Code.gs`, paste your existing Sheet ID in `SPREADSHEET_ID` if the script is not bound to your old Sheet.
-4. Deploy as Web App:
-   - Execute as: **Me**
-   - Who has access: **Anyone**
-5. Copy the `/exec` Web App URL and paste it into `DEFAULT_CLOUD_API_URL` at the top of `app.js`.
-6. Upload `index.html`, `app.js`, `style.css`, and `assets/logo.png` to GitHub Pages.
-
-Version: `4.4-simple-login-local-fallback`
-
-
-## v4.4 note
-Login now opens without a password even when Google Apps Script is not connected. Until the Apps Script /exec URL is deployed and reachable, data is stored only on the current device and will not be shared between mobile and desktop.
-
-
-## v4.6 changes
-- Added search box in Log Entry / Payment to search by vehicle number or distributor name.
-- Added Statement search box to filter by vehicle number or distributor name.
-- Clear button now clears statement dates, distributor filter and search text.
+Google Apps Script is unchanged from v4.6. Use Code.gs only if you want a full backup replacement.

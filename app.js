@@ -1,7 +1,7 @@
 const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec";
-const APP_VERSION = "4.6-search-vehicle-distributor";
+const APP_VERSION = "4.7-mobile-layout";
 const FORCE_BACKEND_MODE = false;
-// v4.6: simple username-only login with vehicle/distributor search in entry and statement.
+// v4.7: mobile-first layout/orientation fixes plus simple username-only login and search.
 // Login never depends on Google Apps Script. Google Sheet sync is optional and runs after the app opens.
 // For mobile/desktop shared data, deploy Code.gs and keep the /exec URL above updated.
 let CLOUD_API_URL = DEFAULT_CLOUD_API_URL;
