@@ -1,8 +1,9 @@
 const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec";
-const APP_VERSION = "4.3-simple-login";
-const FORCE_BACKEND_MODE = true;
-// v4.3: simple username-only login. No password is required; mobile and desktop use the same Google Sheet backend.
-// If your Apps Script /exec deployment changed, replace only the URL above once in app.js.
+const APP_VERSION = "4.5-simple-direct-login";
+const FORCE_BACKEND_MODE = false;
+// v4.5: simple username-only login. No password is required.
+// Login never depends on Google Apps Script. Google Sheet sync is optional and runs after the app opens.
+// For mobile/desktop shared data, deploy Code.gs and keep the /exec URL above updated.
 let CLOUD_API_URL = DEFAULT_CLOUD_API_URL;
 try { localStorage.removeItem("kcb_backend_url"); } catch {}
 
@@ -328,46 +329,26 @@ async function loginUser(username) {
     showLoginHelp("");
     showLoading("Opening ledger...");
 
-    try {
-      const health = await checkBackendHealth();
-      if (health && health.ok && String(health.storage || "").toLowerCase().includes("sheet")) {
-        // v4.3: username-only login. Backend creates/uses a session without checking any password.
-        const data = await apiGet("login", { username });
-        hideLoading("Ready");
+    // v4.5: Always open with username only.
+    // This removes password/authentication blocking completely.
+    // Google Sheet sync is attempted after opening; if it is not connected, the app continues using this device.
+    currentUser = {
+      username,
+      role: username === "admin" ? "admin" : "user",
+      token: "local-" + Date.now(),
+      authMode: "local"
+    };
 
-        if (data && data.ok) {
-          currentUser = {
-            username: data.user.username,
-            role: data.user.role,
-            token: data.token,
-            authMode: "backend"
-          };
-
-          localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
-          document.body.classList.remove("auth-locked");
-          const box = document.getElementById("loginErrorBox");
-          if (box) box.innerHTML = "";
-          applyAccessControl();
-          switchTab(isAdmin() ? "dashboard" : "logentry");
-          fetchCloudData(false);
-          showToast(`Welcome ${currentUser.username}`);
-          return true;
-        }
-
-        showLoginHelp(`<b>${escapeHTML(data.error || "Unable to login")}</b><br><br>No password is required. Enter <code>admin</code> for full access or any staff name for entry access.`);
-        showToast(data.error || "Unable to login", "error");
-        return false;
-      }
-    } catch (backendErr) {
-      console.warn("Backend login unavailable", backendErr);
-    }
-
+    localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
+    document.body.classList.remove("auth-locked");
+    applyAccessControl();
+    switchTab(isAdmin() ? "dashboard" : "logentry");
     hideLoading("Ready");
+    showToast(`Welcome ${currentUser.username}`);
 
-    showLoginHelp(`<b>Google Sheet backend is not connected.</b><br>No-password login needs the Apps Script backend to create a shared session.<br><br><b>Fix:</b> In your old Google Sheet open <code>Extensions → Apps Script</code>, paste the latest <code>Code.gs</code>, then <code>Deploy → Manage deployments → Edit → New version → Deploy</code> with access set to <code>Anyone</code>.`);
-    finishQuietSync("Google Sheet not connected");
-    showToast("Google Sheet backend not connected", "error");
-    return false;
+    // Sync in background only. Failure should never block login.
+    fetchCloudData(false);
+    return true;
   } catch (err) {
     hideLoading("Login failed");
     const msg = escapeHTML(err.message || "Login failed");
@@ -392,13 +373,7 @@ async function logoutUser(callBackend = true) {
 function restoreLogin() {
   try {
     const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
-    // v4.2: clear old LOCAL sessions. They were the reason mobile and desktop did not share data/users.
-    if (saved?.authMode === "local" || String(saved?.token || "").startsWith("local-")) {
-      localStorage.removeItem(SESSION_KEY);
-      localStorage.removeItem("kcb_backup");
-      document.body.classList.add("auth-locked");
-      return false;
-    }
+    // v4.4: keep simple this-device sessions so login works even before Apps Script is connected.
     if (saved?.username && saved?.role && saved?.token) {
       currentUser = saved;
       document.body.classList.remove("auth-locked");
@@ -551,8 +526,16 @@ async function fetchCloudData(showToastOnDone = true) {
     }
   }
 
+  if (isLocalFallbackMode()) {
+    loadLocalBackup(false);
+    finishQuietSync("This device mode - Sheet not connected");
+    if (showToastOnDone) {
+      showToast("Google Sheet not connected. Using this-device data.", "warn");
+    }
+    return;
+  }
+
   finishQuietSync("Google Sheet not connected");
-  // v4.2: do not silently show this-device backup. That made mobile/desktop look different.
   vehicles = {};
   transactions = [];
   renderAll();
@@ -649,6 +632,11 @@ async function postToCloud(payload, options = {}) {
     if (refreshData) setTimeout(() => fetchCloudData(false), 2500);
   } catch (err) {
     console.warn("Google Sheet write failed", err);
+    if (isLocalFallbackMode()) {
+      finishQuietSync("This device only - Sheet not connected");
+      showToast("Saved on this device only. Connect Apps Script for shared Sheet sync.", "warn");
+      return;
+    }
     finishQuietSync("Google Sheet save failed");
     showToast("Not saved. Google Sheet backend is not connected. Check Apps Script deployment.", "error");
   }
@@ -1160,14 +1148,7 @@ function bindForms() {
 window.addEventListener("online", () => showToast("Internet connected"));
 window.addEventListener("offline", () => showToast("Internet disconnected", "error"));
 window.addEventListener("load", () => {
-  // Clear old emergency/local state from earlier packages.
-  try {
-    const oldSession = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
-    if (oldSession?.authMode === "local" || String(oldSession?.token || "").startsWith("local-")) {
-      localStorage.removeItem(SESSION_KEY);
-      localStorage.removeItem("kcb_backup");
-    }
-  } catch {}
+  // v4.5: keep local session and local backup. Do not clear device data on refresh.
   if (localStorage.getItem("kcb_dark") === "true") document.body.classList.add("dark");
   bindForms();
   hydrateBackendUrlInputs();

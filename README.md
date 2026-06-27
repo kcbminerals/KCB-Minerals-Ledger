@@ -27,4 +27,8 @@ This package is changed to **username-only login**. No password is required.
 5. Copy the `/exec` Web App URL and paste it into `DEFAULT_CLOUD_API_URL` at the top of `app.js`.
 6. Upload `index.html`, `app.js`, `style.css`, and `assets/logo.png` to GitHub Pages.
 
-Version: `4.3-simple-login`
+Version: `4.4-simple-login-local-fallback`
+
+
+## v4.4 note
+Login now opens without a password even when Google Apps Script is not connected. Until the Apps Script /exec URL is deployed and reachable, data is stored only on the current device and will not be shared between mobile and desktop.
