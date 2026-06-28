@@ -1,4 +1,4 @@
-const KCB_SW_VERSION = '5.3-force-cloud-no-cache';
+const KCB_SW_VERSION = '5.4-force-cloud-no-cache';
 self.addEventListener('install', event => {
   self.skipWaiting();
 });

@@ -1,9 +1,9 @@
 const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec"; // v5.3: force-connected to the verified KCB Apps Script backend.
-const APP_VERSION = "5.3-force-cloud-fix";
+const APP_VERSION = "5.4-direct-sheet-fix";
 const FORCE_BACKEND_MODE = false;
 // v5.1: adds in-app Google Sheet connection setup, remembers the Apps Script URL, and uploads pending saves after connection.
 // Login remains username-only. Google Sheet is the shared source of truth when Apps Script is correctly deployed.
-const BACKEND_URL_KEY = "kcb_backend_url_v53";
+const BACKEND_URL_KEY = "kcb_backend_url_v54";
 let CLOUD_API_URL = (() => {
   const validExecUrl = value => /^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:[?#].*)?$/.test(String(value || "").trim());
   try {
@@ -22,10 +22,10 @@ let CLOUD_API_URL = (() => {
 (function forceVerifiedCloudUrl(){
   try {
     const verifiedUrl = DEFAULT_CLOUD_API_URL;
-    ["kcb_backend_url", "kcb_backend_url_v51", "kcb_backend_url_v52", "kcb_backend_url_v53"].forEach(k => localStorage.setItem(k, verifiedUrl));
+    ["kcb_backend_url", "kcb_backend_url_v51", "kcb_backend_url_v52", "kcb_backend_url_v53", "kcb_backend_url_v54"].forEach(k => localStorage.setItem(k, verifiedUrl));
     CLOUD_API_URL = verifiedUrl;
     const savedSession = JSON.parse(localStorage.getItem("kcb_current_user") || "null");
-    if (savedSession && savedSession.authMode === "local") {
+    if (savedSession && savedSession.authMode === "old-local-disabled") {
       localStorage.removeItem("kcb_current_user");
       window.KCB_FORCE_RELOGIN = true;
     }
@@ -37,10 +37,10 @@ let CLOUD_API_URL = (() => {
 window.kcbForceCloudFix = function(){
   try {
     const verifiedUrl = DEFAULT_CLOUD_API_URL;
-    ["kcb_backend_url", "kcb_backend_url_v51", "kcb_backend_url_v52", "kcb_backend_url_v53"].forEach(k => localStorage.setItem(k, verifiedUrl));
+    ["kcb_backend_url", "kcb_backend_url_v51", "kcb_backend_url_v52", "kcb_backend_url_v53", "kcb_backend_url_v54"].forEach(k => localStorage.setItem(k, verifiedUrl));
     localStorage.removeItem("kcb_current_user");
     if (navigator.serviceWorker) navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister()));
-    alert("Cloud URL fixed. Login again with admin, then press Sync.");
+    alert("Cloud URL fixed. Login again with admin, then press Sync. v5.4 does not require backend login token.");
     location.reload(true);
   } catch (err) { alert(err.message || err); }
 };
@@ -402,7 +402,7 @@ function authMode() {
 }
 
 function isLocalFallbackMode() {
-  return authMode() === "local";
+  return authMode() === "local" || authMode() === "publicCloud";
 }
 
 function backendAuthParams() {
@@ -459,7 +459,7 @@ function apiGet(action, params = {}) {
     script.onerror = () => {
       if (done) return;
       cleanup();
-      reject(new Error("Unable to connect to built-in Apps Script backend. Redeploy Web App with access set to Anyone."));
+      reject(new Error("Cloud script did not return JSONP. Use v5.4 Code.gs and deploy Web App as Anyone."));
     };
 
     function cleanup() {
@@ -577,36 +577,25 @@ async function loginUser(username) {
     showLoginHelp("");
     showLoading("Opening ledger...");
 
-    let openedWithBackend = false;
-    try {
-      // v4.8: use backend session when Apps Script is connected so admin edits/deletes update Google Sheets.
-      await withTimeout(backendLogin(username), 4500, "Backend login timeout");
-      openedWithBackend = true;
-    } catch (cloudErr) {
-      console.warn("Opening in local mode; backend login failed", cloudErr);
-    }
-
-    if (!openedWithBackend) {
-      if (hasBackendUrl()) {
-        throw new Error("Cloud login failed even though backend URL is set. Open the Apps Script /exec?action=health link and redeploy as Anyone if needed.");
-      }
-      currentUser = {
-        username,
-        role: username === "admin" ? "admin" : "user",
-        token: "local-" + Date.now(),
-        authMode: "local"
-      };
-      localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
-    }
+    // v5.4: do not block login on backend token/CORS.
+    // Login is username-only. The app opens immediately, then reads/writes Google Sheet through public JSONP endpoints.
+    currentUser = {
+      username,
+      role: username === "admin" ? "admin" : "user",
+      token: "public-" + Date.now(),
+      authMode: "publicCloud"
+    };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
 
     document.body.classList.remove("auth-locked");
     applyAccessControl();
     switchTab(isAdmin() ? "dashboard" : "logentry");
     hideLoading("Ready");
-    showToast(openedWithBackend ? `Welcome ${currentUser.username} — Sheet connected` : `Welcome ${currentUser.username} — this-device mode`);
+    showToast(`Welcome ${currentUser.username}`);
 
-    fetchCloudData(false);
-    if (!openedWithBackend) setTimeout(() => upgradeSessionToBackend(false), 1000);
+    fetchCloudData(false).then(() => {
+      if (lastCloudReadOk && getPendingWrites().length) flushPendingWrites(false);
+    });
     return true;
   } catch (err) {
     hideLoading("Login failed");
@@ -632,17 +621,13 @@ async function logoutUser(callBackend = true) {
 function restoreLogin() {
   try {
     const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
-    // v4.4: keep simple this-device sessions so login works even before Apps Script is connected.
+    // v5.4: keep username-only sessions. Backend token is not required for Sheet sync.
     if (saved?.username && saved?.role && saved?.token) {
-      if (saved.authMode === "local") {
-        localStorage.removeItem(SESSION_KEY);
-        document.body.classList.add("auth-locked");
-        showLoginHelp("<b>Cloud sync is ready.</b><br>Login again with <code>admin</code>, then press Sync Sheet. Your pending entries are still saved.");
-        return false;
-      }
+      if (saved.authMode === "local") saved.authMode = "publicCloud";
       currentUser = saved;
       document.body.classList.remove("auth-locked");
       applyAccessControl();
+      setTimeout(() => fetchCloudData(false), 300);
       return true;
     }
   } catch {}
@@ -793,7 +778,6 @@ async function fetchCloudData(showToastOnDone = true) {
         lastCloudReadOk = true;
         lastSyncAt = Date.now();
         finishQuietSync("Connected to Google Sheet");
-        if (isLocalFallbackMode()) setTimeout(() => upgradeSessionToBackend(false), 500);
         if (getPendingWrites().length) setTimeout(() => flushPendingWrites(false), 600);
         if (showToastOnDone) showToast("Synced from Google Sheet");
         return;

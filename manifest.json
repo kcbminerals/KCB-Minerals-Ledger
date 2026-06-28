@@ -1,7 +1,7 @@
 {
-  "name": "KCB Minerals Ledger Pro",
+  "name": "KCB Minerals Ledger Pro v5.4",
   "short_name": "KCB Ledger",
-  "description": "Premium Google Sheet synced ledger for jars, payments, statements and distributors.",
+  "description": "Premium ledger with direct Google Sheet sync",
   "start_url": "./?v=5.3",
   "display": "standalone",
   "background_color": "#0f172a",
