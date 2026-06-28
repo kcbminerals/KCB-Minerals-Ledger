@@ -1,4 +1,4 @@
-const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec"; // v5.2: connected to KCB Apps Script backend; cache-bust fix.
+const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec";// v5.2: connected to KCB Apps Script backend; cache-bust fix.
 const APP_VERSION = "5.2-cache-sync-fix";
 const FORCE_BACKEND_MODE = false;
 // v5.1: adds in-app Google Sheet connection setup, remembers the Apps Script URL, and uploads pending saves after connection.
