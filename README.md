@@ -1,18 +1,40 @@
-KCB Minerals Ledger v4.7 - Mobile Layout Fix
+# KCB Minerals Ledger v4.8 - Sync + Edit Fix
 
-Changes:
-- Mobile sidebar changed into bottom navigation.
-- Log Entry, Payment, Statement and Register pages now use one-column mobile layout.
-- Inputs and buttons are larger and easier to tap on phone.
-- Tables scroll horizontally instead of breaking the screen.
-- Statement filters stack properly on mobile.
-- Cache version updated to v4.7.
+This version keeps the no-password login but fixes two Google Sheet issues:
 
-Upload to GitHub:
-1. Replace index.html
-2. Replace style.css
-3. Replace app.js
-4. Commit changes
-5. Open the app on mobile and refresh/clear cache.
+1. Mobile and desktop read the same Google Sheet data after sync.
+2. Edited log entries update the existing row in Google Sheets instead of only changing this device.
 
-Google Apps Script is unchanged from v4.6. Use Code.gs only if you want a full backup replacement.
+## Files to upload to GitHub
+
+Upload/replace these files in your GitHub Pages repository:
+
+- index.html
+- app.js
+- style.css
+- assets/logo.png
+
+## File to paste in Apps Script
+
+Paste Code.gs into the Google Sheet's Apps Script project, then deploy a new Web App version.
+
+Important: if Apps Script is not bound to your old Google Sheet, paste your old Sheet ID in this line inside Code.gs:
+
+const SPREADSHEET_ID = '';
+
+Example:
+
+const SPREADSHEET_ID = 'YOUR_OLD_GOOGLE_SHEET_ID_HERE';
+
+## Deploy settings
+
+Deploy > Manage deployments > Edit > New version
+
+- Execute as: Me
+- Who has access: Anyone
+
+Copy the /exec URL and paste it into app.js at the top:
+
+const DEFAULT_CLOUD_API_URL = "YOUR_APPS_SCRIPT_EXEC_URL";
+
+Then commit app.js to GitHub and hard refresh the website.

@@ -1,9 +1,8 @@
 const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec";
-const APP_VERSION = "4.7-mobile-layout";
+const APP_VERSION = "4.8-sync-edit-fix";
 const FORCE_BACKEND_MODE = false;
-// v4.7: mobile-first layout/orientation fixes plus simple username-only login and search.
-// Login never depends on Google Apps Script. Google Sheet sync is optional and runs after the app opens.
-// For mobile/desktop shared data, deploy Code.gs and keep the /exec URL above updated.
+// v4.8: fixes cloud sync between mobile/desktop and updates edited log entries in Google Sheets.
+// Login remains username-only. When Apps Script is available, the app gets a backend session automatically; otherwise it falls back to this-device mode.
 let CLOUD_API_URL = DEFAULT_CLOUD_API_URL;
 try { localStorage.removeItem("kcb_backend_url"); } catch {}
 
@@ -15,6 +14,7 @@ let activeTab = "dashboard";
 let revenueChart = null;
 let paymentChart = null;
 let currentUser = null;
+let lastCloudReadOk = false;
 
 const SESSION_KEY = "kcb_current_user";
 const LOCAL_USERS_KEY = "kcb_local_users_v2";
@@ -241,7 +241,7 @@ function apiGet(action, params = {}) {
       if (done) return;
       cleanup();
       reject(new Error("Backend did not respond. Check Apps Script /exec URL and deployment."));
-    }, 9000);
+    }, 15000);
 
     window[cb] = data => {
       done = true;
@@ -280,6 +280,46 @@ function showLoginHelp(message) {
 async function checkBackendHealth() {
   const data = await apiGet("health", { t: Date.now() });
   return data;
+}
+
+function withTimeout(promise, ms, message = "Timed out") {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function backendLogin(username) {
+  const data = await apiGet("login", { username, t: Date.now() });
+  if (!data || data.ok === false || !data.token) {
+    throw new Error(data?.error || "Backend login failed");
+  }
+  currentUser = {
+    username: String(data.user?.username || username || "user").toLowerCase(),
+    role: data.user?.role === "admin" ? "admin" : "user",
+    token: data.token,
+    authMode: "backend"
+  };
+  localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
+  return currentUser;
+}
+
+async function upgradeSessionToBackend(showToastOnDone = false) {
+  if (!currentUser || !isLocalFallbackMode()) return false;
+  const username = currentUser.username;
+  try {
+    await withTimeout(backendLogin(username), 5000, "Backend login timeout");
+    applyAccessControl();
+    finishQuietSync("Connected to Google Sheet");
+    if (showToastOnDone) showToast("Connected to Google Sheet");
+    return true;
+  } catch (err) {
+    console.warn("Backend session upgrade failed", err);
+    return false;
+  }
 }
 
 function requireSession() {
@@ -329,25 +369,33 @@ async function loginUser(username) {
     showLoginHelp("");
     showLoading("Opening ledger...");
 
-    // v4.5: Always open with username only.
-    // This removes password/authentication blocking completely.
-    // Google Sheet sync is attempted after opening; if it is not connected, the app continues using this device.
-    currentUser = {
-      username,
-      role: username === "admin" ? "admin" : "user",
-      token: "local-" + Date.now(),
-      authMode: "local"
-    };
+    let openedWithBackend = false;
+    try {
+      // v4.8: use backend session when Apps Script is connected so admin edits/deletes update Google Sheets.
+      await withTimeout(backendLogin(username), 4500, "Backend login timeout");
+      openedWithBackend = true;
+    } catch (cloudErr) {
+      console.warn("Opening in local mode; backend login failed", cloudErr);
+    }
 
-    localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
+    if (!openedWithBackend) {
+      currentUser = {
+        username,
+        role: username === "admin" ? "admin" : "user",
+        token: "local-" + Date.now(),
+        authMode: "local"
+      };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
+    }
+
     document.body.classList.remove("auth-locked");
     applyAccessControl();
     switchTab(isAdmin() ? "dashboard" : "logentry");
     hideLoading("Ready");
-    showToast(`Welcome ${currentUser.username}`);
+    showToast(openedWithBackend ? `Welcome ${currentUser.username} — Sheet connected` : `Welcome ${currentUser.username} — this-device mode`);
 
-    // Sync in background only. Failure should never block login.
     fetchCloudData(false);
+    if (!openedWithBackend) setTimeout(() => upgradeSessionToBackend(false), 1000);
     return true;
   } catch (err) {
     hideLoading("Login failed");
@@ -378,6 +426,7 @@ function restoreLogin() {
       currentUser = saved;
       document.body.classList.remove("auth-locked");
       applyAccessControl();
+      if (saved.authMode === "local") setTimeout(() => upgradeSessionToBackend(false), 800);
       return true;
     }
   } catch {}
@@ -517,7 +566,9 @@ async function fetchCloudData(showToastOnDone = true) {
       if (data && (data.vehicles || data.transactions || data.ok)) {
         if (data.ok === false && data.error) throw new Error(data.error);
         applyCloudData(data);
-        finishQuietSync(isLocalFallbackMode() ? "Local mode - backend unavailable" : "Connected to Google Sheet");
+        lastCloudReadOk = true;
+        finishQuietSync("Connected to Google Sheet");
+        if (isLocalFallbackMode()) setTimeout(() => upgradeSessionToBackend(false), 500);
         if (showToastOnDone) showToast("Synced from Google Sheet");
         return;
       }
@@ -535,10 +586,9 @@ async function fetchCloudData(showToastOnDone = true) {
     return;
   }
 
+  lastCloudReadOk = false;
   finishQuietSync("Google Sheet not connected");
-  vehicles = {};
-  transactions = [];
-  renderAll();
+  loadLocalBackup(false);
   if (showToastOnDone) {
     showToast("Could not sync Google Sheet. Redeploy Apps Script Web App with access = Anyone.", "error");
   }
@@ -614,9 +664,12 @@ function normalizeTx(tx) {
 
 async function postToCloud(payload, options = {}) {
   const { refreshData = true, successMessage = "Saved successfully" } = options;
-  const securedPayload = isLocalFallbackMode()
-    ? { ...payload, publicWrite: true, updatedBy: currentUser?.username || "local-user" }
-    : { ...payload, sessionToken: requireSession() };
+  const securedPayload = {
+    ...payload,
+    publicWrite: true,
+    updatedBy: currentUser?.username || "local-user"
+  };
+  if (!isLocalFallbackMode()) securedPayload.sessionToken = requireSession();
 
   // Show the change immediately on this device, but always send it to Google Sheet too.
   // After the Sheet write, we sync again so mobile and desktop match.
@@ -626,8 +679,9 @@ async function postToCloud(payload, options = {}) {
   showToast("Saving to Google Sheet...", "warn");
 
   try {
-    await postToCloudForm(securedPayload);
-    finishQuietSync("Saved to Google Sheet");
+    const result = await postToCloudJsonp(securedPayload);
+    if (!result || result.ok === false) throw new Error(result?.error || "Google Sheet write failed");
+    finishQuietSync(result.message || "Saved to Google Sheet");
     showToast(successMessage + " — syncing other devices...");
     if (refreshData) setTimeout(() => fetchCloudData(false), 2500);
   } catch (err) {
@@ -668,6 +722,11 @@ function applyLocalWrite(payload) {
   } catch (err) {
     console.warn("Local write failed", err);
   }
+}
+
+function postToCloudJsonp(payload) {
+  // v4.8: verified write. Apps Script returns ok/error through JSONP so edits cannot silently fail.
+  return apiGet("writePublic", { payload: JSON.stringify(payload), t: Date.now() });
 }
 
 function postToCloudForm(payload) {
