@@ -1,40 +1,43 @@
-# KCB Minerals Ledger v4.8 - Sync + Edit Fix
+# KCB Minerals Ledger Pro v5.0 - Premium Stable Build
 
-This version keeps the no-password login but fixes two Google Sheet issues:
+This version is the high-end app package:
 
-1. Mobile and desktop read the same Google Sheet data after sync.
-2. Edited log entries update the existing row in Google Sheets instead of only changing this device.
+- Premium dashboard with live KPI cards, insights and cloud health.
+- Mobile-first bottom navigation and desktop sidebar.
+- Username-only login, no password.
+- Google Sheet is the shared source of truth when Apps Script is connected.
+- Queue-based saving: if the Sheet is temporarily offline, entries are saved locally and retried later.
+- Safer transaction IDs so edits update the exact Google Sheet row.
+- Edit/delete writes are verified through Apps Script JSONP responses.
+- Statement quick filters: Today, 7 Days and Month.
+- Search by vehicle number or distributor name.
+- PWA manifest/service worker for installable app behavior.
 
-## Files to upload to GitHub
-
-Upload/replace these files in your GitHub Pages repository:
+## GitHub files
+Upload/replace:
 
 - index.html
 - app.js
 - style.css
+- manifest.json
+- service-worker.js
 - assets/logo.png
 
-## File to paste in Apps Script
+## Apps Script file
+Paste Code.gs into the Google Sheet Apps Script project.
 
-Paste Code.gs into the Google Sheet's Apps Script project, then deploy a new Web App version.
+Recommended: add your old Google Sheet ID here in Code.gs:
 
-Important: if Apps Script is not bound to your old Google Sheet, paste your old Sheet ID in this line inside Code.gs:
+const SPREADSHEET_ID = 'YOUR_OLD_GOOGLE_SHEET_ID';
 
-const SPREADSHEET_ID = '';
+Deploy settings:
 
-Example:
-
-const SPREADSHEET_ID = 'YOUR_OLD_GOOGLE_SHEET_ID_HERE';
-
-## Deploy settings
-
-Deploy > Manage deployments > Edit > New version
-
+- Deploy > Manage deployments > Edit > New version
 - Execute as: Me
 - Who has access: Anyone
 
-Copy the /exec URL and paste it into app.js at the top:
+Copy the /exec URL and paste it into app.js:
 
-const DEFAULT_CLOUD_API_URL = "YOUR_APPS_SCRIPT_EXEC_URL";
+const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/DEPLOYMENT_ID/exec";
 
-Then commit app.js to GitHub and hard refresh the website.
+After GitHub commit, hard refresh desktop with Ctrl + Shift + R. On mobile, clear site data once or open in incognito.

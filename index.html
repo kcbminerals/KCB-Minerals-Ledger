@@ -4,13 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KCB Minerals Ledger Pro</title>
-  <meta name="theme-color" content="#2563eb" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="description" content="KCB Minerals high-end cloud ledger for jars, payments, statements and Google Sheet sync." />
+  <link rel="manifest" href="manifest.json?v=5.0" />
+  <link rel="apple-touch-icon" href="assets/logo.png" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-  <link rel="stylesheet" href="style.css?v=4.7" />
+  <link rel="stylesheet" href="style.css?v=5.0" />
 </head>
 <body class="auth-locked">
   <div id="toast" class="toast hidden"></div>
@@ -51,6 +54,7 @@
     <div class="sync-card">
       <span class="pulse"></span>
       <span id="syncIndicator">Ready</span>
+      <small id="sideSyncMeta">Preparing...</small>
     </div>
 
     <nav class="nav-list">
@@ -76,13 +80,14 @@
     <header class="topbar no-print">
       <div>
         <h2 id="topBarContextTitle">Dashboard</h2>
-        <p>India Edition • Google Sheet Cloud Sync</p>
+        <p>India Edition • Premium Google Sheet Cloud Sync • <span id="lastSyncText">Not synced yet</span></p>
       </div>
       <div class="top-actions">
         <span class="top-user-pill"><b id="topUserName">Guest</b><small id="topUserRole">-</small></span>
         <button id="topExportExcel" class="btn btn-secondary admin-only" onclick="exportExcel()">📊 Excel</button>
         <button id="topExportPDF" class="btn btn-secondary admin-only" onclick="exportPDF()">📄 PDF</button>
         <button class="btn btn-primary" onclick="fetchCloudData()">🔄 Sync</button>
+        <button id="installPwaBtn" class="btn btn-secondary hidden" onclick="installPwa()">📲 Install</button>
         <button class="btn btn-secondary" onclick="logoutUser()">Logout</button>
       </div>
     </header>
@@ -91,9 +96,11 @@
       <div class="hero-card">
         <div>
           <h1>📊 Analytics Dashboard</h1>
-          <p>Distributor-wise jars, revenue, payments and outstanding balance.</p>
+          <p>Live command center for jars, revenue, payments, outstanding and fleet performance.</p>
         </div>
-        <div class="hero-actions">
+        <div class="hero-actions premium-actions">
+          <button class="btn btn-glass" onclick="switchTab('logentry')">➕ New Entry</button>
+          <button class="btn btn-glass" onclick="switchTab('register')">🚛 Vehicle</button>
           <select id="reportFilterDistributor" class="input" onchange="onDistributorFilterChange()">
             <option value="all">All Distributors</option>
           </select>
@@ -105,11 +112,30 @@
         </div>
       </div>
 
-      <div class="stats-grid">
+      <div class="stats-grid premium-kpi">
         <div class="stat-card blue"><span>Jars Delivered</span><strong id="repJars">0</strong><small>Selected period</small></div>
         <div class="stat-card green"><span>Total Revenue</span><strong id="repEarnings">₹0.00</strong><small>Billing value</small></div>
         <div class="stat-card amber"><span>Payments</span><strong id="repPayments">₹0.00</strong><small>Collected amount</small></div>
         <div class="stat-card red"><span>Outstanding</span><strong id="repNet">₹0.00</strong><small>Revenue - payments</small></div>
+      </div>
+
+      <div class="grid xl:grid-cols-3 gap-6 premium-insights">
+        <div class="card insight-card">
+          <h3>⚡ Today Performance</h3>
+          <div class="insight-row"><span>Jars</span><b id="highTodayJars">0</b></div>
+          <div class="insight-row"><span>Payments</span><b id="highTodayPayments">₹0.00</b></div>
+          <div class="insight-row"><span>Today Net</span><b id="highTodayNet">₹0.00</b></div>
+        </div>
+        <div class="card insight-card">
+          <h3>🏆 Top Outstanding</h3>
+          <div id="highTopOutstanding" class="priority-list"><div class="empty compact">No outstanding dues.</div></div>
+        </div>
+        <div class="card insight-card">
+          <h3>☁️ Cloud Health</h3>
+          <div class="insight-row"><span>Status</span><b id="highCloudStatus">Checking</b></div>
+          <div class="insight-row"><span>Pending saves</span><b id="highPendingWrites">0</b></div>
+          <div class="insight-row"><span>Last sync</span><b id="highLastSync">Not synced</b></div>
+        </div>
       </div>
 
       <div class="grid xl:grid-cols-2 gap-6">
@@ -132,6 +158,10 @@
       <div class="grid lg:grid-cols-3 gap-6">
         <div class="card">
           <h3 id="txFormTitle">📝 New Transaction</h3>
+          <div id="editModeBanner" class="edit-banner hidden">
+            <span>Editing old transaction</span>
+            <button type="button" class="btn btn-secondary" onclick="cancelTxEdit()">Cancel Edit</button>
+          </div>
           <div class="segmented full mb-4">
             <button id="tabLoad" onclick="setEntryType('load')" class="active" type="button">🚛 Load Jars</button>
             <button id="tabPayment" onclick="setEntryType('payment')" type="button">💵 Payment</button>
@@ -169,6 +199,11 @@
         <div><h1>📑 Customer Statement</h1><p>Complete vehicle and distributor ledger.</p></div>
         <div class="hero-actions statement-filters">
           <input id="statementSearch" class="input" oninput="renderDetailedDistributorReport()" placeholder="Search vehicle no. / distributor" />
+          <div class="quick-filter-bar">
+            <button class="btn btn-glass" onclick="setStatementQuickPeriod('today')">Today</button>
+            <button class="btn btn-glass" onclick="setStatementQuickPeriod('week')">7 Days</button>
+            <button class="btn btn-glass" onclick="setStatementQuickPeriod('month')">Month</button>
+          </div>
           <select id="statementDistributor" class="input" onchange="changeStatementDistributor()"><option value="all">All Distributors</option></select>
           <label class="date-filter-label">From<input id="statementFromDate" class="input" type="date" /></label>
           <label class="date-filter-label">To<input id="statementToDate" class="input" type="date" /></label>
@@ -235,6 +270,6 @@
     </section>
   </main>
 
-  <script src="app.js?v=4.7"></script>
+  <script src="app.js?v=5.0"></script>
 </body>
 </html>

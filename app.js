@@ -1,8 +1,8 @@
 const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec";
-const APP_VERSION = "4.8-sync-edit-fix";
+const APP_VERSION = "5.0-premium-stable";
 const FORCE_BACKEND_MODE = false;
-// v4.8: fixes cloud sync between mobile/desktop and updates edited log entries in Google Sheets.
-// Login remains username-only. When Apps Script is available, the app gets a backend session automatically; otherwise it falls back to this-device mode.
+// v5.0: premium stable build with queue-based Google Sheet sync, safer edit IDs, PWA install support and refined mobile/desktop UI.
+// Login remains username-only. Google Sheet is the shared source of truth when Apps Script is correctly deployed.
 let CLOUD_API_URL = DEFAULT_CLOUD_API_URL;
 try { localStorage.removeItem("kcb_backend_url"); } catch {}
 
@@ -15,9 +15,13 @@ let revenueChart = null;
 let paymentChart = null;
 let currentUser = null;
 let lastCloudReadOk = false;
+let lastSyncAt = 0;
+let deferredInstallPrompt = null;
 
 const SESSION_KEY = "kcb_current_user";
 const LOCAL_USERS_KEY = "kcb_local_users_v2";
+const PENDING_WRITES_KEY = "kcb_pending_writes_v5";
+const BACKUP_KEY = "kcb_backup";
 const DEFAULT_LOCAL_USERS = {
   admin: { role: "admin" },
   user: { role: "user" }
@@ -34,6 +38,93 @@ function getLocalUsers() {
 
 function saveLocalUsers(users) {
   localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(users || DEFAULT_LOCAL_USERS));
+}
+
+function generateId(prefix = "tx") {
+  const random = (window.crypto && crypto.getRandomValues)
+    ? Array.from(crypto.getRandomValues(new Uint32Array(2))).map(n => n.toString(36)).join("")
+    : Math.random().toString(36).slice(2, 12);
+  return `${prefix}_${Date.now()}_${random}`;
+}
+
+function quoteArg(value) {
+  return JSON.stringify(String(value ?? ""));
+}
+
+function getPendingWrites() {
+  try {
+    const list = JSON.parse(localStorage.getItem(PENDING_WRITES_KEY) || "[]");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePendingWrites(list) {
+  localStorage.setItem(PENDING_WRITES_KEY, JSON.stringify(Array.isArray(list) ? list : []));
+  updateSyncMeta();
+}
+
+function queuePendingWrite(payload, reason = "pending") {
+  const list = getPendingWrites();
+  const action = String(payload?.action || "");
+  const target = action === "saveVehicle" ? String(payload.vehicle || "") : action === "deleteTx" ? String(payload.id || "") : String(payload?.tx?.id || "");
+  const existingIndex = list.findIndex(item => String(item.action) === action && String(item.target) === target && target);
+  const item = { id: generateId("pending"), action, target, payload, reason, attempts: 0, queuedAt: Date.now() };
+  if (existingIndex >= 0) list[existingIndex] = item;
+  else list.push(item);
+  savePendingWrites(list);
+  return item;
+}
+
+function removePendingWrite(pendingId) {
+  savePendingWrites(getPendingWrites().filter(item => item.id !== pendingId));
+}
+
+function reapplyPendingWritesToView() {
+  getPendingWrites().forEach(item => applyLocalWrite(item.payload, { silent: true }));
+}
+
+function updateSyncMeta(statusText = "") {
+  const pending = getPendingWrites().length;
+  const lastText = lastSyncAt ? cleanFormatDate(lastSyncAt) : "Not synced";
+  if ($("lastSyncText")) $("lastSyncText").textContent = lastSyncAt ? `Last sync: ${lastText}` : "Not synced yet";
+  if ($("sideSyncMeta")) $("sideSyncMeta").textContent = `${pending} pending • ${lastSyncAt ? "Synced" : "Waiting"}`;
+  if ($("highPendingWrites")) $("highPendingWrites").textContent = pending;
+  if ($("highLastSync")) $("highLastSync").textContent = lastText;
+  if ($("highCloudStatus")) $("highCloudStatus").textContent = statusText || (lastCloudReadOk ? "Connected" : "Device mode");
+}
+
+async function flushPendingWrites(showToastOnDone = false) {
+  if (!currentUser) return;
+  const pending = getPendingWrites();
+  if (!pending.length) { updateSyncMeta(); return; }
+  startQuietSync(`Uploading ${pending.length} pending save(s)...`);
+  let uploaded = 0;
+  for (const item of pending) {
+    try {
+      const securedPayload = { ...item.payload, publicWrite: true, updatedBy: currentUser?.username || "local-user" };
+      if (!isLocalFallbackMode()) securedPayload.sessionToken = requireSession();
+      const result = await postToCloudJsonp(securedPayload);
+      if (!result || result.ok === false) throw new Error(result?.error || "Pending save failed");
+      removePendingWrite(item.id);
+      uploaded += 1;
+    } catch (err) {
+      console.warn("Pending write still waiting", err);
+      const list = getPendingWrites();
+      const found = list.find(x => x.id === item.id);
+      if (found) { found.attempts = Number(found.attempts || 0) + 1; found.reason = err.message || "retry later"; savePendingWrites(list); }
+      break;
+    }
+  }
+  if (uploaded) {
+    finishQuietSync("Pending saves uploaded");
+    if (showToastOnDone) showToast(`${uploaded} pending save(s) uploaded`);
+    await fetchCloudData(false);
+  } else {
+    finishQuietSync("Pending saves waiting");
+  }
+  updateSyncMeta();
 }
 
 
@@ -110,6 +201,7 @@ function startQuietSync(message = "Syncing...") {
     indicator.textContent = "⌛ " + message;
     indicator.className = "sync-text syncing";
   }
+  updateSyncMeta("Syncing");
 }
 
 function finishQuietSync(message = "Connected") {
@@ -118,6 +210,7 @@ function finishQuietSync(message = "Connected") {
     indicator.textContent = "🟢 " + message;
     indicator.className = "sync-text connected";
   }
+  updateSyncMeta(message);
 }
 
 function hydrateBackendUrlInputs() {
@@ -151,6 +244,7 @@ async function testBackendConnection() {
     throw new Error(health?.error || "Backend health check failed");
   } catch (err) {
     finishQuietSync("Google Sheet not connected");
+  updateSyncMeta("Sheet not connected");
     const msg = err.message || "Connection failed";
     showToast(msg, "error");
     const help = $("backendStatusText");
@@ -359,6 +453,7 @@ function applyAccessControl() {
   if ($("sidebarUserName")) $("sidebarUserName").textContent = name;
   if ($("sidebarUserRole")) $("sidebarUserRole").textContent = role;
   if (isAdmin()) refreshUserList(false);
+  updateSyncMeta();
 }
 
 async function loginUser(username) {
@@ -567,8 +662,10 @@ async function fetchCloudData(showToastOnDone = true) {
         if (data.ok === false && data.error) throw new Error(data.error);
         applyCloudData(data);
         lastCloudReadOk = true;
+        lastSyncAt = Date.now();
         finishQuietSync("Connected to Google Sheet");
         if (isLocalFallbackMode()) setTimeout(() => upgradeSessionToBackend(false), 500);
+        if (getPendingWrites().length) setTimeout(() => flushPendingWrites(false), 600);
         if (showToastOnDone) showToast("Synced from Google Sheet");
         return;
       }
@@ -580,6 +677,7 @@ async function fetchCloudData(showToastOnDone = true) {
   if (isLocalFallbackMode()) {
     loadLocalBackup(false);
     finishQuietSync("This device mode - Sheet not connected");
+    updateSyncMeta("Device mode");
     if (showToastOnDone) {
       showToast("Google Sheet not connected. Using this-device data.", "warn");
     }
@@ -588,6 +686,7 @@ async function fetchCloudData(showToastOnDone = true) {
 
   lastCloudReadOk = false;
   finishQuietSync("Google Sheet not connected");
+  updateSyncMeta("Sheet not connected");
   loadLocalBackup(false);
   if (showToastOnDone) {
     showToast("Could not sync Google Sheet. Redeploy Apps Script Web App with access = Anyone.", "error");
@@ -634,16 +733,18 @@ function legacyJsonpGetData() {
 function applyCloudData(data) {
   vehicles = data?.vehicles || {};
   transactions = Array.isArray(data?.transactions) ? data.transactions : [];
-  transactions = transactions.map(normalizeTx).sort((a,b) => (b.timestamp || 0) - (a.timestamp || 0));
-  localStorage.setItem("kcb_backup", JSON.stringify({ vehicles, transactions }));
+  transactions = transactions.map(normalizeTx).sort((a,b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+  localStorage.setItem(BACKUP_KEY, JSON.stringify({ vehicles, transactions }));
+  reapplyPendingWritesToView();
   renderAll();
+  updateSyncMeta("Connected");
 }
 
 function loadLocalBackup(showMessage = true) {
   try {
-    const data = JSON.parse(localStorage.getItem("kcb_backup") || "{}");
+    const data = JSON.parse(localStorage.getItem(BACKUP_KEY) || "{}");
     vehicles = data.vehicles || {};
-    transactions = data.transactions || [];
+    transactions = (data.transactions || []).map(normalizeTx);
     renderAll();
     if (showMessage && (transactions.length || Object.keys(vehicles).length)) showToast("Loaded this device backup", "warn");
   } catch {}
@@ -651,7 +752,7 @@ function loadLocalBackup(showMessage = true) {
 
 function normalizeTx(tx) {
   return {
-    id: Number(tx.id || Date.now() + Math.random()),
+    id: String(tx.id || generateId()),
     timestamp: Number(tx.timestamp || Date.now()),
     datetimeStr: tx.datetimeStr || cleanFormatDate(tx.timestamp),
     vehicle: String(tx.vehicle || ""),
@@ -663,7 +764,7 @@ function normalizeTx(tx) {
 }
 
 async function postToCloud(payload, options = {}) {
-  const { refreshData = true, successMessage = "Saved successfully" } = options;
+  const { refreshData = true, successMessage = "Saved successfully", applyLocal = true } = options;
   const securedPayload = {
     ...payload,
     publicWrite: true,
@@ -671,32 +772,36 @@ async function postToCloud(payload, options = {}) {
   };
   if (!isLocalFallbackMode()) securedPayload.sessionToken = requireSession();
 
-  // Show the change immediately on this device, but always send it to Google Sheet too.
-  // After the Sheet write, we sync again so mobile and desktop match.
-  if (isLocalFallbackMode()) applyLocalWrite(payload);
+  // Premium stable flow: update UI instantly, then verify Sheet save.
+  // If Sheet is offline, the exact write is queued and retried later with the same ID.
+  if (applyLocal) applyLocalWrite(payload);
+
+  if (!navigator.onLine) {
+    queuePendingWrite(payload, "offline");
+    finishQuietSync("Offline - queued safely");
+    showToast("Saved on this device and queued for Google Sheet sync", "warn");
+    return;
+  }
 
   startQuietSync("Saving to Google Sheet...");
-  showToast("Saving to Google Sheet...", "warn");
 
   try {
     const result = await postToCloudJsonp(securedPayload);
     if (!result || result.ok === false) throw new Error(result?.error || "Google Sheet write failed");
+    lastCloudReadOk = true;
     finishQuietSync(result.message || "Saved to Google Sheet");
-    showToast(successMessage + " — syncing other devices...");
-    if (refreshData) setTimeout(() => fetchCloudData(false), 2500);
+    showToast(successMessage);
+    if (refreshData) setTimeout(() => fetchCloudData(false), 900);
+    if (getPendingWrites().length) setTimeout(() => flushPendingWrites(false), 1400);
   } catch (err) {
     console.warn("Google Sheet write failed", err);
-    if (isLocalFallbackMode()) {
-      finishQuietSync("This device only - Sheet not connected");
-      showToast("Saved on this device only. Connect Apps Script for shared Sheet sync.", "warn");
-      return;
-    }
-    finishQuietSync("Google Sheet save failed");
-    showToast("Not saved. Google Sheet backend is not connected. Check Apps Script deployment.", "error");
+    queuePendingWrite(payload, err.message || "write failed");
+    finishQuietSync("Saved here - Sheet pending");
+    showToast("Saved on this device. Google Sheet sync is pending.", "warn");
   }
 }
 
-function applyLocalWrite(payload) {
+function applyLocalWrite(payload, options = {}) {
   try {
     if (payload.action === "saveVehicle") {
       const vehicle = String(payload.vehicle || "").trim().toUpperCase();
@@ -710,15 +815,15 @@ function applyLocalWrite(payload) {
       };
     } else if (payload.action === "addTx" && payload.tx) {
       const tx = normalizeTx(payload.tx);
-      const index = transactions.findIndex(t => Number(t.id) === Number(tx.id));
+      const index = transactions.findIndex(t => String(t.id) === String(tx.id));
       if (index >= 0) transactions[index] = tx;
       else transactions.unshift(tx);
       transactions.sort((a,b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
     } else if (payload.action === "deleteTx") {
-      transactions = transactions.filter(t => Number(t.id) !== Number(payload.id));
+      transactions = transactions.filter(t => String(t.id) !== String(payload.id));
     }
-    localStorage.setItem("kcb_backup", JSON.stringify({ vehicles, transactions }));
-    renderAll();
+    localStorage.setItem(BACKUP_KEY, JSON.stringify({ vehicles, transactions }));
+    if (!options.silent) renderAll();
   } catch (err) {
     console.warn("Local write failed", err);
   }
@@ -793,6 +898,8 @@ function renderAll() {
   renderDetailedDistributorReport();
   updateTodaySummary();
   updateFleetSummary();
+  renderPremiumInsights();
+  updateSyncMeta();
 }
 
 function getLedger() {
@@ -967,7 +1074,7 @@ function renderDashboardSummary() {
   Object.values(ledger).sort((a,b) => a.dist.localeCompare(b.dist)).forEach(r => {
     const due = r.bill - r.paid;
     totalJars += r.jars; totalBill += r.bill; totalPaid += r.paid;
-    body.insertAdjacentHTML("beforeend", `<tr onclick="selectDistributor('${escapeHTML(r.dist)}')"><td><b>${escapeHTML(r.dist)}</b></td><td>${escapeHTML(r.vehicle)}</td><td class="right">${r.jars}</td><td class="right">${formatINR(r.bill)}</td><td class="right green-text">${formatINR(r.paid)}</td><td class="right" style="color:${due>0?'#ef4444':'#10b981'}"><b>${formatINR(due)}</b></td></tr>`);
+    body.insertAdjacentHTML("beforeend", `<tr onclick="selectDistributor(${quoteArg(r.dist)})"><td><b>${escapeHTML(r.dist)}</b></td><td>${escapeHTML(r.vehicle)}</td><td class="right">${r.jars}</td><td class="right">${formatINR(r.bill)}</td><td class="right green-text">${formatINR(r.paid)}</td><td class="right" style="color:${due>0?'#ef4444':'#10b981'}"><b>${formatINR(due)}</b></td></tr>`);
   });
   if (body.children.length) body.insertAdjacentHTML("beforeend", `<tr><td colspan="2"><b>Grand Total</b></td><td class="right"><b>${totalJars}</b></td><td class="right"><b>${formatINR(totalBill)}</b></td><td class="right"><b>${formatINR(totalPaid)}</b></td><td class="right"><b>${formatINR(totalBill-totalPaid)}</b></td></tr>`);
 }
@@ -1098,7 +1205,7 @@ function renderAuditTrail() {
   body.innerHTML = "";
   filtered.forEach(t => {
     const dist = vehicles[t.vehicle]?.distributorName || "N/A";
-    const actions = isAdmin() ? `<button class="btn btn-secondary" onclick="inlineEditTx(${t.id})">Edit</button> <button class="btn btn-red" onclick="deleteTx(${t.id})">Delete</button>` : `<span class="badge">View only</span>`;
+    const actions = isAdmin() ? `<button class="btn btn-secondary" onclick="inlineEditTx(${quoteArg(t.id)})">Edit</button> <button class="btn btn-red" onclick="deleteTx(${quoteArg(t.id)})">Delete</button>` : `<span class="badge">View only</span>`;
     body.insertAdjacentHTML("beforeend", `<tr><td>${cleanFormatDate(t.timestamp)}</td><td><b>${escapeHTML(t.vehicle)}</b><br><small>${escapeHTML(dist)}</small></td><td>${t.type === "load" ? '<span class="badge badge-load">LOAD</span>' : '<span class="badge badge-payment">PAYMENT</span>'}</td><td class="right">${t.jars || "-"}</td><td class="right">${t.rateApplied ? formatINR(t.rateApplied) : "-"}</td><td class="right"><b>${formatINR(t.financialValue)}</b></td><td class="center">${actions}</td></tr>`);
   });
   $("recordCount").textContent = filtered.length;
@@ -1111,12 +1218,13 @@ function setEntryType(type) {
   $("tabPayment").classList.toggle("active", type === "payment");
   $("divJarInput").classList.toggle("hidden", type !== "load");
   $("divPaymentInput").classList.toggle("hidden", type !== "payment");
-  $("txSubmitBtn").textContent = type === "load" ? "Submit Load" : "Submit Payment";
+  const editing = !!$("txForm")?.dataset?.editId;
+  $("txSubmitBtn").textContent = editing ? "Update Transaction" : (type === "load" ? "Submit Load" : "Submit Payment");
 }
 
 function inlineEditTx(id) {
   if (!isAdmin()) return showToast("Only admin can edit old transactions", "error");
-  const tx = transactions.find(t => Number(t.id) === Number(id));
+  const tx = transactions.find(t => String(t.id) === String(id));
   if (!tx) return;
   switchTab("logentry");
   setEntryType(tx.type);
@@ -1129,12 +1237,13 @@ function inlineEditTx(id) {
   $("txAmount").value = tx.type === "payment" ? tx.financialValue : "";
   $("txForm").dataset.editId = tx.id;
   $("txFormTitle").textContent = "✏️ Edit Transaction";
+  if ($("editModeBanner")) $("editModeBanner").classList.remove("hidden");
   window.scrollTo({top:0,behavior:"smooth"});
 }
 
 function deleteTx(id) {
   if (!isAdmin()) return showToast("Only admin can delete transactions", "error");
-  if (confirm("Delete this transaction?")) postToCloud({ action:"deleteTx", id:Number(id) });
+  if (confirm("Delete this transaction from app and Google Sheet?")) postToCloud({ action:"deleteTx", id:String(id) }, { successMessage:"Transaction deleted" });
 }
 
 function updateTodaySummary() {
@@ -1160,6 +1269,55 @@ function updateFleetSummary() {
   if ($("distributorCount")) $("distributorCount").textContent = distSet.size;
   if ($("avgRate")) $("avgRate").textContent = formatINR(avg);
 }
+
+function renderPremiumInsights() {
+  const today = new Date().toDateString();
+  let todayJars = 0, todayPayments = 0, todayNet = 0;
+  transactions.forEach(t => {
+    if (new Date(Number(t.timestamp || 0)).toDateString() !== today) return;
+    if (t.type === "load") { todayJars += Number(t.jars || 0); todayNet += Number(t.financialValue || 0); }
+    else { todayPayments += Number(t.financialValue || 0); todayNet -= Number(t.financialValue || 0); }
+  });
+  if ($("highTodayJars")) $("highTodayJars").textContent = todayJars;
+  if ($("highTodayPayments")) $("highTodayPayments").textContent = formatINR(todayPayments);
+  if ($("highTodayNet")) $("highTodayNet").textContent = formatINR(todayNet);
+
+  const wrap = $("highTopOutstanding");
+  if (wrap) {
+    const rows = Object.values(getLedger())
+      .map(r => ({ ...r, due: Number(r.bill || 0) - Number(r.paid || 0) }))
+      .filter(r => r.due > 0)
+      .sort((a,b) => b.due - a.due)
+      .slice(0, 5);
+    wrap.innerHTML = rows.length ? "" : `<div class="empty compact">No outstanding dues.</div>`;
+    rows.forEach(r => wrap.insertAdjacentHTML("beforeend", `<button class="priority-item" onclick="selectDistributor(${quoteArg(r.dist)})"><span><b>${escapeHTML(r.dist)}</b><small>${escapeHTML(r.vehicle)}</small></span><strong>${formatINR(r.due)}</strong></button>`));
+  }
+  updateSyncMeta();
+}
+
+function setStatementQuickPeriod(type) {
+  const now = new Date();
+  const yyyyMmDd = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  let from = new Date(now);
+  if (type === "today") from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  else if (type === "week") from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+  else if (type === "month") from = new Date(now.getFullYear(), now.getMonth(), 1);
+  if ($("statementFromDate")) $("statementFromDate").value = yyyyMmDd(from);
+  if ($("statementToDate")) $("statementToDate").value = yyyyMmDd(now);
+  renderDetailedDistributorReport();
+}
+
+function cancelTxEdit() {
+  const form = $("txForm");
+  if (!form) return;
+  form.reset();
+  delete form.dataset.editId;
+  clearTxVehicleSearch();
+  setEntryType("load");
+  if ($("txFormTitle")) $("txFormTitle").textContent = "📝 New Transaction";
+  if ($("editModeBanner")) $("editModeBanner").classList.add("hidden");
+}
+
 
 function renderVehicleRatesList() {
   const wrap = $("vehicleRatesList");
@@ -1278,17 +1436,35 @@ function bindForms() {
     const amount = currentEntryType === "load" ? jars * rate : Number($("txAmount").value);
     if (currentEntryType === "load" && jars <= 0) return showToast("Enter jar quantity", "error");
     if (currentEntryType === "payment" && amount <= 0) return showToast("Enter payment amount", "error");
-    const tx = { id: $("txForm").dataset.editId ? Number($("txForm").dataset.editId) : Date.now(), timestamp, datetimeStr: cleanFormatDate(timestamp), vehicle, type:currentEntryType, jars, rateApplied: currentEntryType === "load" ? rate : 0, financialValue: amount, submittedBy: currentUser?.username || "unknown" };
-    postToCloud({ action:"addTx", tx });
-    $("txForm").reset();
-    clearTxVehicleSearch();
-    delete $("txForm").dataset.editId;
-    $("txFormTitle").textContent = "📝 New Transaction";
-    setEntryType("load");
+    const tx = { id: $("txForm").dataset.editId ? String($("txForm").dataset.editId) : generateId(), timestamp, datetimeStr: cleanFormatDate(timestamp), vehicle, type:currentEntryType, jars, rateApplied: currentEntryType === "load" ? rate : 0, financialValue: amount, submittedBy: currentUser?.username || "unknown" };
+    postToCloud({ action:"addTx", tx }, { successMessage: $("txForm").dataset.editId ? "Transaction updated" : "Transaction saved" });
+    cancelTxEdit();
   });
 }
 
-window.addEventListener("online", () => showToast("Internet connected"));
+
+function installPwa() {
+  if (!deferredInstallPrompt) return showToast("Install option will appear after opening this app in Chrome/Edge once.", "warn");
+  deferredInstallPrompt.prompt();
+  deferredInstallPrompt.userChoice.finally(() => {
+    deferredInstallPrompt = null;
+    $("installPwaBtn")?.classList.add("hidden");
+  });
+}
+
+window.addEventListener("beforeinstallprompt", e => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  $("installPwaBtn")?.classList.remove("hidden");
+});
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("service-worker.js?v=5.0").catch(err => console.warn("Service worker registration failed", err));
+  });
+}
+
+window.addEventListener("online", () => { showToast("Internet connected"); flushPendingWrites(true); });
 window.addEventListener("offline", () => showToast("Internet disconnected", "error"));
 window.addEventListener("load", () => {
   // v4.5: keep local session and local backup. Do not clear device data on refresh.
@@ -1300,6 +1476,9 @@ window.addEventListener("load", () => {
   if (loggedIn) {
     switchTab(isAdmin() ? "dashboard" : "logentry");
     fetchCloudData(false);
+    setTimeout(() => flushPendingWrites(false), 1500);
   }
-  setInterval(() => { if (document.visibilityState === "visible" && currentUser) fetchCloudData(false); }, 120000);
+  updateSyncMeta();
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && currentUser) { fetchCloudData(false); flushPendingWrites(false); } });
+  setInterval(() => { if (document.visibilityState === "visible" && currentUser) fetchCloudData(false); }, 90000);
 });
