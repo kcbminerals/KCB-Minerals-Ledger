@@ -1,10 +1,12 @@
-const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec";
-const APP_VERSION = "5.0-premium-stable";
+const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec"; // v5.1: connected to KCB Apps Script backend.
+const APP_VERSION = "5.1-premium-upload-fix";
 const FORCE_BACKEND_MODE = false;
-// v5.0: premium stable build with queue-based Google Sheet sync, safer edit IDs, PWA install support and refined mobile/desktop UI.
+// v5.1: adds in-app Google Sheet connection setup, remembers the Apps Script URL, and uploads pending saves after connection.
 // Login remains username-only. Google Sheet is the shared source of truth when Apps Script is correctly deployed.
-let CLOUD_API_URL = DEFAULT_CLOUD_API_URL;
-try { localStorage.removeItem("kcb_backend_url"); } catch {}
+const BACKEND_URL_KEY = "kcb_backend_url_v51";
+let CLOUD_API_URL = (() => {
+  try { return (localStorage.getItem(BACKEND_URL_KEY) || DEFAULT_CLOUD_API_URL || "").trim(); } catch { return DEFAULT_CLOUD_API_URL || ""; }
+})();
 
 let vehicles = {};
 let transactions = [];
@@ -88,11 +90,15 @@ function reapplyPendingWritesToView() {
 function updateSyncMeta(statusText = "") {
   const pending = getPendingWrites().length;
   const lastText = lastSyncAt ? cleanFormatDate(lastSyncAt) : "Not synced";
+  const hasUrl = hasBackendUrl();
+  const status = statusText || (lastCloudReadOk ? "Connected" : (hasUrl ? "Device mode" : "Sheet URL missing"));
   if ($("lastSyncText")) $("lastSyncText").textContent = lastSyncAt ? `Last sync: ${lastText}` : "Not synced yet";
-  if ($("sideSyncMeta")) $("sideSyncMeta").textContent = `${pending} pending • ${lastSyncAt ? "Synced" : "Waiting"}`;
+  if ($("sideSyncMeta")) $("sideSyncMeta").textContent = `${pending} pending • ${lastCloudReadOk ? "Synced" : (hasUrl ? "Waiting" : "Connect Sheet")}`;
   if ($("highPendingWrites")) $("highPendingWrites").textContent = pending;
   if ($("highLastSync")) $("highLastSync").textContent = lastText;
-  if ($("highCloudStatus")) $("highCloudStatus").textContent = statusText || (lastCloudReadOk ? "Connected" : "Device mode");
+  if ($("highCloudStatus")) $("highCloudStatus").textContent = status;
+  if ($("backendStatusText")) $("backendStatusText").textContent = lastCloudReadOk ? "Connected to Google Sheet" : (hasUrl ? "URL saved. Test connection / upload pending." : "Paste Apps Script /exec URL to upload pending data.");
+  if ($("pendingUploadCount")) $("pendingUploadCount").textContent = pending;
 }
 
 async function flushPendingWrites(showToastOnDone = false) {
@@ -213,6 +219,25 @@ function finishQuietSync(message = "Connected") {
   updateSyncMeta(message);
 }
 
+function hasBackendUrl() {
+  const url = String(CLOUD_API_URL || "").trim();
+  return /^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:[?#].*)?$/.test(url);
+}
+
+function getBackendUrlFromInputs() {
+  const ids = ["backendUrlInput", "backendUrlInputSidebar", "backendUrlInputLogin"];
+  for (const id of ids) {
+    const el = $(id);
+    const value = String(el?.value || "").trim();
+    if (value) return value;
+  }
+  return String(CLOUD_API_URL || "").trim();
+}
+
+function explainBackendUrl() {
+  return "Paste the Google Apps Script Web App URL ending with /exec. Example: https://script.google.com/macros/s/.../exec";
+}
+
 function hydrateBackendUrlInputs() {
   const current = CLOUD_API_URL || "";
   ["backendUrlInput", "backendUrlInputSidebar"].forEach(id => {
@@ -221,20 +246,63 @@ function hydrateBackendUrlInputs() {
   });
 }
 
-function saveBackendUrl() {
-  // v4.1: the Google Apps Script connection is built into app.js.
-  CLOUD_API_URL = DEFAULT_CLOUD_API_URL;
-  try { localStorage.removeItem("kcb_backend_url"); } catch {}
+async function saveBackendUrl() {
+  const nextUrl = getBackendUrlFromInputs();
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:[?#].*)?$/.test(nextUrl)) {
+    showToast(explainBackendUrl(), "error");
+    const help = $("backendStatusText");
+    if (help) help.textContent = explainBackendUrl();
+    return false;
+  }
+  CLOUD_API_URL = nextUrl.trim();
+  try { localStorage.setItem(BACKEND_URL_KEY, CLOUD_API_URL); } catch {}
   hydrateBackendUrlInputs();
-  showToast("Using built-in Google Sheet connection");
-  testBackendConnection();
+  showToast("Google Sheet URL saved. Testing connection...");
+  const ok = await testBackendConnection();
+  if (ok && currentUser) {
+    await upgradeSessionToBackend(false);
+    await fetchCloudData(false);
+    await flushPendingWrites(true);
+  }
+  return ok;
+}
+
+function clearBackendUrl() {
+  CLOUD_API_URL = DEFAULT_CLOUD_API_URL || "";
+  try { localStorage.removeItem(BACKEND_URL_KEY); } catch {}
+  lastCloudReadOk = false;
+  hydrateBackendUrlInputs();
+  updateSyncMeta("Sheet URL missing");
+  showToast("Google Sheet URL cleared", "warn");
+}
+
+async function uploadPendingNow() {
+  if (!currentUser) return showToast("Login first", "error");
+  if (!hasBackendUrl()) {
+    openBackendSettings();
+    return showToast("Paste Apps Script /exec URL first", "error");
+  }
+  await testBackendConnection();
+  await upgradeSessionToBackend(false);
+  await flushPendingWrites(true);
+  await fetchCloudData(false);
 }
 
 async function testBackendConnection() {
+  if (!hasBackendUrl()) {
+    lastCloudReadOk = false;
+    finishQuietSync("Sheet URL missing");
+    updateSyncMeta("Sheet URL missing");
+    const help = $("backendStatusText");
+    if (help) help.textContent = explainBackendUrl();
+    return false;
+  }
   try {
     startQuietSync("Testing Google Sheet connection...");
     const health = await apiGet("health", { t: Date.now() });
     if (health && health.ok) {
+      lastCloudReadOk = true;
+      lastSyncAt = Date.now();
       finishQuietSync("Connected to Google Sheet");
       showToast("Google Sheet connection working");
       const help = $("backendStatusText");
@@ -243,8 +311,9 @@ async function testBackendConnection() {
     }
     throw new Error(health?.error || "Backend health check failed");
   } catch (err) {
+    lastCloudReadOk = false;
     finishQuietSync("Google Sheet not connected");
-  updateSyncMeta("Sheet not connected");
+    updateSyncMeta("Sheet not connected");
     const msg = err.message || "Connection failed";
     showToast(msg, "error");
     const help = $("backendStatusText");
@@ -326,6 +395,10 @@ function localFallbackLogin(username) {
 
 function apiGet(action, params = {}) {
   return new Promise((resolve, reject) => {
+    if (!hasBackendUrl()) {
+      reject(new Error("Google Sheet URL is not set. Paste your Apps Script /exec URL in Connect Sheet."));
+      return;
+    }
     const cb = "kcb_api_" + Date.now() + "_" + Math.floor(Math.random() * 100000);
     const script = document.createElement("script");
     const query = new URLSearchParams({ action, callback: cb, ...params });
@@ -644,6 +717,14 @@ function switchTab(tabName) {
 
 async function fetchCloudData(showToastOnDone = true) {
   if (!currentUser) return;
+  if (!hasBackendUrl()) {
+    lastCloudReadOk = false;
+    loadLocalBackup(false);
+    finishQuietSync("This device mode - Sheet URL missing");
+    updateSyncMeta("Sheet URL missing");
+    if (showToastOnDone) showToast("Google Sheet URL missing. Tap Connect Sheet and paste the /exec URL.", "warn");
+    return;
+  }
   startQuietSync("Syncing with Google Sheet...");
 
   const attempts = [];
@@ -773,8 +854,15 @@ async function postToCloud(payload, options = {}) {
   if (!isLocalFallbackMode()) securedPayload.sessionToken = requireSession();
 
   // Premium stable flow: update UI instantly, then verify Sheet save.
-  // If Sheet is offline, the exact write is queued and retried later with the same ID.
+  // If Sheet is offline or not connected, the exact write is queued and retried later with the same ID.
   if (applyLocal) applyLocalWrite(payload);
+
+  if (!hasBackendUrl()) {
+    queuePendingWrite(payload, "sheet url missing");
+    finishQuietSync("Saved here - Connect Sheet to upload");
+    showToast("Saved on this device. Connect Google Sheet to upload pending data.", "warn");
+    return;
+  }
 
   if (!navigator.onLine) {
     queuePendingWrite(payload, "offline");
