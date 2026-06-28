@@ -1,11 +1,19 @@
-const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec"; // v5.1: connected to KCB Apps Script backend.
-const APP_VERSION = "5.1-premium-upload-fix";
+const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec"; // v5.2: connected to KCB Apps Script backend; cache-bust fix.
+const APP_VERSION = "5.2-cache-sync-fix";
 const FORCE_BACKEND_MODE = false;
 // v5.1: adds in-app Google Sheet connection setup, remembers the Apps Script URL, and uploads pending saves after connection.
 // Login remains username-only. Google Sheet is the shared source of truth when Apps Script is correctly deployed.
-const BACKEND_URL_KEY = "kcb_backend_url_v51";
+const BACKEND_URL_KEY = "kcb_backend_url_v52";
 let CLOUD_API_URL = (() => {
-  try { return (localStorage.getItem(BACKEND_URL_KEY) || DEFAULT_CLOUD_API_URL || "").trim(); } catch { return DEFAULT_CLOUD_API_URL || ""; }
+  const validExecUrl = value => /^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:[?#].*)?$/.test(String(value || "").trim());
+  try {
+    const saved = String(localStorage.getItem(BACKEND_URL_KEY) || "").trim();
+    const url = validExecUrl(saved) ? saved : String(DEFAULT_CLOUD_API_URL || "").trim();
+    if (validExecUrl(url)) localStorage.setItem(BACKEND_URL_KEY, url);
+    return url;
+  } catch {
+    return DEFAULT_CLOUD_API_URL || "";
+  }
 })();
 
 let vehicles = {};
@@ -28,6 +36,9 @@ const DEFAULT_LOCAL_USERS = {
   admin: { role: "admin" },
   user: { role: "user" }
 };
+
+// v5.2: make diagnostics visible in the browser console for quick support.
+window.KCB_LEDGER_INFO = { appVersion: APP_VERSION, backendUrl: CLOUD_API_URL };
 
 function getLocalUsers() {
   try {
@@ -1548,7 +1559,7 @@ window.addEventListener("beforeinstallprompt", e => {
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("service-worker.js?v=5.0").catch(err => console.warn("Service worker registration failed", err));
+    navigator.serviceWorker.register("service-worker.js?v=5.2").catch(err => console.warn("Service worker registration failed", err));
   });
 }
 
