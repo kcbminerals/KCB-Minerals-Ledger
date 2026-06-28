@@ -1,9 +1,9 @@
-const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec";// v5.2: connected to KCB Apps Script backend; cache-bust fix.
-const APP_VERSION = "5.2-cache-sync-fix";
+const DEFAULT_CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbwA5eKoBNAbaKix_-cpHoLrfBxwnZzYfnBreUkZRIRjZV6UjLXUq8HA44R_grfd6-qC/exec"; // v5.3: force-connected to the verified KCB Apps Script backend.
+const APP_VERSION = "5.3-force-cloud-fix";
 const FORCE_BACKEND_MODE = false;
 // v5.1: adds in-app Google Sheet connection setup, remembers the Apps Script URL, and uploads pending saves after connection.
 // Login remains username-only. Google Sheet is the shared source of truth when Apps Script is correctly deployed.
-const BACKEND_URL_KEY = "kcb_backend_url_v52";
+const BACKEND_URL_KEY = "kcb_backend_url_v53";
 let CLOUD_API_URL = (() => {
   const validExecUrl = value => /^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:[?#].*)?$/.test(String(value || "").trim());
   try {
@@ -15,6 +15,35 @@ let CLOUD_API_URL = (() => {
     return DEFAULT_CLOUD_API_URL || "";
   }
 })();
+
+
+// v5.3 emergency fix: force the verified backend URL and remove old local-only login sessions.
+// Pending writes remain safe in kcb_pending_writes_v5 and will upload after the user logs in again.
+(function forceVerifiedCloudUrl(){
+  try {
+    const verifiedUrl = DEFAULT_CLOUD_API_URL;
+    ["kcb_backend_url", "kcb_backend_url_v51", "kcb_backend_url_v52", "kcb_backend_url_v53"].forEach(k => localStorage.setItem(k, verifiedUrl));
+    CLOUD_API_URL = verifiedUrl;
+    const savedSession = JSON.parse(localStorage.getItem("kcb_current_user") || "null");
+    if (savedSession && savedSession.authMode === "local") {
+      localStorage.removeItem("kcb_current_user");
+      window.KCB_FORCE_RELOGIN = true;
+    }
+  } catch (err) {
+    console.warn("Force cloud URL setup failed", err);
+  }
+})();
+
+window.kcbForceCloudFix = function(){
+  try {
+    const verifiedUrl = DEFAULT_CLOUD_API_URL;
+    ["kcb_backend_url", "kcb_backend_url_v51", "kcb_backend_url_v52", "kcb_backend_url_v53"].forEach(k => localStorage.setItem(k, verifiedUrl));
+    localStorage.removeItem("kcb_current_user");
+    if (navigator.serviceWorker) navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister()));
+    alert("Cloud URL fixed. Login again with admin, then press Sync.");
+    location.reload(true);
+  } catch (err) { alert(err.message || err); }
+};
 
 let vehicles = {};
 let transactions = [];
@@ -102,9 +131,9 @@ function updateSyncMeta(statusText = "") {
   const pending = getPendingWrites().length;
   const lastText = lastSyncAt ? cleanFormatDate(lastSyncAt) : "Not synced";
   const hasUrl = hasBackendUrl();
-  const status = statusText || (lastCloudReadOk ? "Connected" : (hasUrl ? "Device mode" : "Sheet URL missing"));
+  const status = statusText || (lastCloudReadOk ? "Connected" : (hasUrl ? "Connecting to Sheet" : "Sheet URL missing"));
   if ($("lastSyncText")) $("lastSyncText").textContent = lastSyncAt ? `Last sync: ${lastText}` : "Not synced yet";
-  if ($("sideSyncMeta")) $("sideSyncMeta").textContent = `${pending} pending • ${lastCloudReadOk ? "Synced" : (hasUrl ? "Waiting" : "Connect Sheet")}`;
+  if ($("sideSyncMeta")) $("sideSyncMeta").textContent = `${pending} pending • ${lastCloudReadOk ? "Synced" : (hasUrl ? "Press Sync" : "Connect Sheet")}`;
   if ($("highPendingWrites")) $("highPendingWrites").textContent = pending;
   if ($("highLastSync")) $("highLastSync").textContent = lastText;
   if ($("highCloudStatus")) $("highCloudStatus").textContent = status;
@@ -558,6 +587,9 @@ async function loginUser(username) {
     }
 
     if (!openedWithBackend) {
+      if (hasBackendUrl()) {
+        throw new Error("Cloud login failed even though backend URL is set. Open the Apps Script /exec?action=health link and redeploy as Anyone if needed.");
+      }
       currentUser = {
         username,
         role: username === "admin" ? "admin" : "user",
@@ -602,10 +634,15 @@ function restoreLogin() {
     const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
     // v4.4: keep simple this-device sessions so login works even before Apps Script is connected.
     if (saved?.username && saved?.role && saved?.token) {
+      if (saved.authMode === "local") {
+        localStorage.removeItem(SESSION_KEY);
+        document.body.classList.add("auth-locked");
+        showLoginHelp("<b>Cloud sync is ready.</b><br>Login again with <code>admin</code>, then press Sync Sheet. Your pending entries are still saved.");
+        return false;
+      }
       currentUser = saved;
       document.body.classList.remove("auth-locked");
       applyAccessControl();
-      if (saved.authMode === "local") setTimeout(() => upgradeSessionToBackend(false), 800);
       return true;
     }
   } catch {}
@@ -1559,7 +1596,7 @@ window.addEventListener("beforeinstallprompt", e => {
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("service-worker.js?v=5.2").catch(err => console.warn("Service worker registration failed", err));
+    navigator.serviceWorker.register("service-worker.js?v=5.3").catch(err => console.warn("Service worker registration failed", err));
   });
 }
 
